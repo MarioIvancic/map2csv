@@ -1,0 +1,1069 @@
+#!/usr/bin/perl -w
+# map2csv
+# Converts GCC MAP file to XLSX format
+# Mario Ivančić 2023
+# Usage: map2csv [-o output-file.xlsx] [input-file.map]
+# Default output file is output.xlsx
+# Default input file is stdin
+# To install copy this file to /usr/local/bin or ~/.local/bin
+# To install Excel::Writer::XLSX: cpan -i Excel::Writer::XLSX
+
+use strict;
+use File::Basename;
+use Math::BigInt;
+use Excel::Writer::XLSX;
+
+my $part1;
+my $section_handler = undef;
+my $exit_on_empty_line = 0;
+my $add_xref_table = 1;
+my $output_section = '';
+my $input_section = '';
+my $object_file = '';
+my $output_file = 'output.xlsx';
+my %output_sections;
+my %input_sections;
+
+my %ignored_sections = (
+	'.ARM.attributes' => 1,
+	'.ARM.exidx' => 1,
+	'.ARM.extab' => 1,
+	'.debug_frame' => 1,
+	'.debug_str' => 1,
+	'.debug_aranges' => 1,
+	'.debug_abbrev' => 1,
+	'.debug_info' => 1,
+	'.debug_line' => 1,
+	'.debug_loc' => 1,
+	'.comment' => 1,
+);
+
+if( ($#ARGV >= 0) && ($ARGV[0] =~ /^-o/) )
+{
+	if( ($#ARGV >= 1) && ($ARGV[0] =~ /^-o$/) )
+	{
+		shift;
+		$output_file = shift;
+	}
+	elsif($ARGV[0] =~ /^-o(.+)$/)
+	{
+		$output_file = $1;
+		shift;
+	}
+	else
+	{
+		die "Invalid or no output file";
+	}
+}
+
+
+my $workbook = Excel::Writer::XLSX->new($output_file);
+$workbook->compatibility_mode();
+$workbook->set_properties(
+	title    => "MAP file",
+	author   => 'Perl',
+	comments => 'Created with Perl and Excel::Writer::XLSX',
+);
+
+my $worksheet;
+my $r = 0;
+my $c = 0;
+my $bold_format = $workbook->add_format(bold => 1, align => 'center');
+my $normal_format = $workbook->add_format(bold => 0, align => 'center');
+my $percent_format = $workbook->add_format(bold => 0, num_format => 10, align => 'center');
+my $integer_format = $workbook->add_format(bold => 0, num_format => 1, align => 'center');
+my $bold_integer_format = $workbook->add_format(bold => 1, num_format => 1, align => 'center');
+
+
+while(<>)
+{
+    chomp;
+
+	# print "Line: '$_'\n";
+
+	if(!$section_handler)
+	{
+		if(/^Archive member included to satisfy reference by file/)
+		{
+			$section_handler = \&process_archive_member;
+			$worksheet = $workbook->add_worksheet('ArchiveMembers');
+			$r = 0;
+			$c = 0;
+			$worksheet->write_string($r, 0, 'Archive member included to satisfy reference by file (symbol)', $normal_format);
+			$r += 2;
+			# Column names
+			$worksheet->write_string($r, 0, 'A Archive', $bold_format);
+			$worksheet->write_string($r, 1, 'A Object', $bold_format);
+			$worksheet->write_string($r, 2, 'B Archive', $bold_format);
+			$worksheet->write_string($r, 3, 'B Object', $bold_format);
+			$worksheet->write_string($r, 4, 'B Symbol', $bold_format);
+			$r++;
+			# Set column width
+			$worksheet->set_column(0, 0, 20);
+			$worksheet->set_column(1, 1, 30);
+			$worksheet->set_column(2, 2, 20);
+			$worksheet->set_column(3, 3, 30);
+			$worksheet->set_column(4, 4, 30);
+			print "Processing archive members\n";
+		}
+		elsif(/^Discarded input section/)
+		{
+			$section_handler = \&process_discarded_section;
+			$worksheet = $workbook->add_worksheet('DiscardedSections');
+			$r = 0;
+			$c = 0;
+			$worksheet->write_string($r, 0, 'Discarded input sections', $normal_format);
+			$r += 2;
+			# Column names
+			$worksheet->write_string($r, 0, 'Section', $bold_format);
+			$worksheet->write_string($r, 1, 'Size', $bold_format);
+			$worksheet->write_string($r, 2, 'Archive', $bold_format);
+			$worksheet->write_string($r, 3, 'Object', $bold_format);
+			$r++;
+			# Set column widths
+			$worksheet->set_column(0, 0, 30);
+			$worksheet->set_column(1, 1, 10);
+			$worksheet->set_column(2, 2, 20);
+			$worksheet->set_column(3, 3, 30);
+			print "Processing discarded input sections\n";
+		}
+		elsif(/^Memory Configuration/)
+		{
+			$section_handler = \&process_memory_configuration;
+			$worksheet = $workbook->add_worksheet('MemoryConfiguration');
+			$r = 0;
+			$c = 0;
+			$worksheet->write_string($r, 0, 'Memory Configuration', $normal_format);
+			$r += 2;
+			# Column names
+			$worksheet->write_string($r, 0, 'Section', $bold_format);
+			$worksheet->write_string($r, 1, 'Start', $bold_format);
+			$worksheet->write_string($r, 2, 'Length', $bold_format);
+			$worksheet->write_string($r, 3, 'Flags', $bold_format);
+			$r++;
+			# Set column widths
+			$worksheet->set_column(0, 0, 30);
+			$worksheet->set_column(1, 1, 16);
+			$worksheet->set_column(2, 2, 16);
+			$worksheet->set_column(3, 3, 10);
+			print "Processing memory configuration\n";
+		}
+		elsif(/^Linker script and memory map/)
+		{
+			$section_handler = \&process_memory_map;
+			$worksheet = $workbook->add_worksheet('MemoryMap');
+			$r = 0;
+			$c = 0;
+			$worksheet->write_string($r, 0, 'Linker script and memory map', $normal_format);
+			$r += 2;
+			# Column names
+			$worksheet->write_string($r, 0, 'Symbol', $bold_format);
+			$worksheet->write_string($r, 1, 'Address', $bold_format);
+			$worksheet->write_string($r, 2, 'Archive', $bold_format);
+			$worksheet->write_string($r, 3, 'Object', $bold_format);
+			$worksheet->write_string($r, 4, 'Section', $bold_format);
+			$r++;
+			# Set column widths
+			$worksheet->set_column(0, 0, 30);
+			$worksheet->set_column(1, 1, 16);
+			$worksheet->set_column(2, 2, 30);
+			$worksheet->set_column(3, 3, 30);
+			$worksheet->set_column(4, 4, 30);
+			print "Processing linker script and memory map\n";
+		}
+		elsif(/^Cross Reference Table/)
+		{
+			$section_handler = \&process_xref_table;
+			$worksheet = $workbook->add_worksheet('CrossRef');
+			$r = 0;
+			$c = 0;
+			$worksheet->write_string($r, 0, 'Cross Reference Table', $normal_format);
+			$r += 2;
+			# Column names
+			$worksheet->write_string($r, 0, 'Symbol', $bold_format);
+			$worksheet->write_string($r, 1, 'Archive', $bold_format);
+			$worksheet->write_string($r, 2, 'Object', $bold_format);
+			$r++;
+			# Set column widths
+			$worksheet->set_column(0, 0, 30);
+			$worksheet->set_column(1, 1, 20);
+			$worksheet->set_column(2, 2, 30);
+			print "Processing cross reference table\n";
+		}
+	}
+	else
+	{
+		$section_handler->($_);
+	}
+}
+
+if($add_xref_table)
+{
+	$add_xref_table = 0;
+
+	# Symbol, Archive, Object
+	my $colum_config = {
+		header_row => 1,
+		autofilter => 1,
+		total_row => 1,
+		columns => [
+			{
+				header => 'Symbol',
+				total_string => 'Total',
+				format => $bold_format,
+			},
+			{
+				header => 'Archive',
+				total_function => 'count',
+				format => $bold_integer_format
+			},
+			{
+				header => 'Object',
+				total_function => 'count',
+				format => $bold_integer_format,
+			},
+		]
+	};
+
+	$worksheet->add_table( 2, 0, $r - 1, 2, $colum_config );
+}
+
+$workbook->close() or die "Error closing file '$output_file': $!";
+
+
+
+#########################################################################################################################
+
+
+sub trim
+{
+	my $val = shift;
+	$val =~ s/^\s*//;
+	$val =~ s/\s*$//;
+	return $val;
+}
+
+
+sub hex2dec
+{
+	my $str = shift;
+	my $dec = Math::BigInt->new($str);
+	return $dec;
+}
+
+
+
+sub write_input_sections
+{
+	$worksheet = $workbook->add_worksheet('InputSections');
+	$r = 0;
+	$c = 0;
+	$worksheet->write_string($r, 0, 'Input sections', $normal_format);
+	$r += 2;
+
+	# Column names
+	$worksheet->write_string($r, 0, 'Section', $bold_format);
+	$worksheet->write_string($r, 1, 'Start', $bold_format);
+	$worksheet->write_string($r, 2, 'Length', $bold_format);
+	$worksheet->write_string($r, 3, 'Archive', $bold_format);
+	$worksheet->write_string($r, 4, 'Object', $bold_format);
+	my $colum_config = {
+		header_row => 1,
+		autofilter => 1,
+		total_row => 1,
+		columns => [
+			{
+				header => 'Section',
+				total_string => 'Total',
+				format => $bold_format,
+			},
+			{
+				header => 'Start',
+				total_function => 'count',
+				format => $bold_integer_format,
+			},
+			{
+				header => 'Length',
+				total_function => 'sum',
+				format => $bold_integer_format
+			},
+			{
+				header => 'Archive',
+				total_function => 'count',
+				format => $bold_integer_format,
+			},
+			{
+				header => 'Object',
+				total_function => 'count',
+				format => $bold_integer_format
+			},
+		]
+    };
+	$r++;
+	# Set column widths
+	$worksheet->set_column(0, 0, 40);
+	$worksheet->set_column(1, 1, 16);
+	$worksheet->set_column(2, 2, 16);
+	$worksheet->set_column(3, 3, 30);
+	$worksheet->set_column(4, 4, 30);
+
+	# $input_sections{$section_name}{$object}{'start'} = $start_address;
+	# $input_sections{$section_name}{$object}{'length'} = $length;
+	foreach my $s (keys(%input_sections))
+	{
+		next if($ignored_sections{$s});
+		my $hr = $input_sections{$s};
+		foreach my $o (keys(%$hr))
+		{
+			my $st = $input_sections{$s}{$o}{'start'};
+			my $lt = $input_sections{$s}{$o}{'length'};
+			my $object = $o;
+			my $archive = '';
+			if($object =~ /^(\S+\.a)\(([^)]+)\)$/)
+			{
+				# $1 is archive
+				# $2 is object
+				$archive = $1;
+				$object = $2;
+			}
+
+			$worksheet->write_string($r, 0, $s, $normal_format);
+			$worksheet->write_number($r, 1, hex2dec($st), $integer_format);
+			$worksheet->write_number($r, 2, hex2dec($lt), $integer_format);
+			$worksheet->write_string($r, 3, $archive, $normal_format);
+			$worksheet->write_string($r, 4, $object, $normal_format);
+			$r++;
+		}
+	}
+
+	$worksheet->add_table( 2, 0, $r - 1, 4, $colum_config );
+}
+
+
+sub write_output_sections
+{
+	$worksheet = $workbook->add_worksheet('OutputSections');
+	$r = 0;
+	$c = 0;
+
+	$worksheet->write_string($r, 0, 'Output sections', $normal_format);
+	$r += 2;
+
+	# Column names
+	$worksheet->write_string($r, 0, 'Section', $bold_format);
+	$worksheet->write_string($r, 1, 'Start', $bold_format);
+	$worksheet->write_string($r, 2, 'Length', $bold_format);
+	$worksheet->write_string($r, 3, 'LoadAddr', $bold_format);
+	my $colum_config = {
+		header_row => 1,
+		autofilter => 1,
+		total_row => 1,
+		columns => [
+			{
+				header => 'Section',
+				total_string => 'Total',
+				format => $bold_format,
+			},
+			{
+				header => 'Start',
+				total_function => 'count',
+				format => $bold_integer_format,
+			},
+			{
+				header => 'Length',
+				total_function => 'sum',
+				format => $bold_integer_format
+			},
+			{
+				header => 'LoadAddr',
+				total_function => 'count',
+				format => $bold_integer_format,
+			},
+		]
+    };
+	$r++;
+	# Set column widths
+	$worksheet->set_column(0, 0, 30);
+	$worksheet->set_column(1, 1, 16);
+	$worksheet->set_column(2, 2, 16);
+	$worksheet->set_column(3, 3, 16);
+
+	# $output_sections{$section_name}{'start'} = $start_address;
+	# $output_sections{$section_name}{'length'} = $length;
+	# $output_sections{$section_name}{'load'} = $load_address;
+	foreach my $s (keys(%output_sections))
+	{
+		next if($ignored_sections{$s});
+		my $st = $output_sections{$s}{'start'};
+		my $lt = $output_sections{$s}{'length'};
+		my $la = $output_sections{$s}{'load'};
+
+		$worksheet->write_string($r, 0, $s, $normal_format);
+		$worksheet->write_number($r, 1, hex2dec($st), $integer_format);
+		$worksheet->write_number($r, 2, hex2dec($lt), $integer_format);
+		$worksheet->write_number($r, 3, hex2dec($la), $normal_format);
+		$r++;
+	}
+
+	$worksheet->add_table( 2, 0, $r - 1, 3, $colum_config );
+}
+
+
+
+
+
+#########################################################################################################################
+
+sub process_archive_member
+{
+	my $line = shift;
+
+	if($line eq '')
+	{
+		if($exit_on_empty_line)
+		{
+			$section_handler = undef;
+			$exit_on_empty_line = 0;
+			# print "Done processing archive members\n";
+
+			# A Archive, A Object, B Archive, B Object, B Symbol
+			my $colum_config = {
+				header_row => 1,
+				autofilter => 1,
+				total_row => 1,
+				columns => [
+					{
+						header => 'A Archive',
+						total_string => 'Total',
+						format => $bold_format,
+					},
+					{
+						header => 'A Object',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+					{
+						header => 'B Archive',
+						total_function => 'count',
+						format => $bold_integer_format
+					},
+					{
+						header => 'B Object',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+					{
+						header => 'B Symbol',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+				]
+			};
+
+			$worksheet->add_table( 2, 0, $r - 1, 4, $colum_config );
+		}
+		else
+		{
+			$exit_on_empty_line = 1;
+		}
+		return;
+	}
+
+	if(($line =~ /^\S/) && ($line =~ /\.o\)$/))
+	{
+		$part1 = $line;
+		# print "Part1: $line\n";
+		return;
+	}
+
+	if(($line =~ /^\s/) && ($line =~ /\)\s*$/))
+	{
+		$line = $part1 . ' ' . $line;
+		$part1 = '';
+		# print "Part1 and part2: $line\n";
+	}
+
+	# /usr/lib/gcc/.../libc_nano.a(lib_a-atexit.o) /usr/lib/gcc/../nofp/crt0.o (atexit)
+	# archive.a(archive-object.o) object.o (symbol)
+	if($line =~ /^\s*([^(]+)\(([a-zA-Z0-9_.-]+\.o)\)\s+([^(]+)\s*\(([^)]+)\)$/)
+	{
+		# $1 is archive
+		# $2 is object file from archive
+		# $3 is object file containg symbol
+		# $4 is symbol
+		my $archive = basename(trim($1));
+		my $archive_object = trim($2);
+		my $symbol_object = basename(trim($3));
+		my $symbol = trim($4);
+		# A Archive, A Object, B Archive, B Object, B Symbol
+		$worksheet->write_string($r, 0, $archive, $normal_format);
+		$worksheet->write_string($r, 1, $archive_object, $normal_format);
+		$worksheet->write_string($r, 2, '', $normal_format);
+		$worksheet->write_string($r, 3, $symbol_object, $normal_format);
+		$worksheet->write_string($r, 4, $symbol, $normal_format);
+		$r++;
+		# print "Archive: $archive, Archive Object: $archive_object, Symbol: $symbol, Symbol Object: $symbol_object\n\n";
+	}
+
+	# /usr/lib/gcc/arm-none-eabi/10.3.1/thumb/v8-m.main/nofp/libgcc.a(_arm_muldf3.o) /usr/lib/gcc/arm-none-eabi/10.3.1/thumb/v8-m.main/nofp/libgcc.a(_fixunssfdi.o) (__aeabi_dmul)
+	# archive.a(archive-object.o) archive.a(object.o) (symbol)
+	elsif($line =~ /^\s*([^(]+)\(([a-zA-Z0-9_.-]+\.o)\)\s+([^(]+)\(([^)]+)\)\s*\(([^)]+)\)$/)
+	{
+		# $1 is archive
+		# $2 is object file from archive
+		# $3 is archive containg symbol
+		# $4 is object file containg symbol
+		# $5 is symbol
+		my $archive = basename(trim($1));
+		my $archive_object = trim($2);
+		my $symbol_archive = basename(trim($3));
+		my $symbol_object = trim($4);
+		my $symbol = trim($5);
+		# A Archive, A Object, B Archive, B Object, B Symbol
+		$worksheet->write_string($r, 0, $archive, $normal_format);
+		$worksheet->write_string($r, 1, $archive_object, $normal_format);
+		$worksheet->write_string($r, 2, $symbol_archive, $normal_format);
+		$worksheet->write_string($r, 3, $symbol_object, $normal_format);
+		$worksheet->write_string($r, 4, $symbol, $normal_format);
+		$r++;
+		$symbol_object = "$symbol_archive:$symbol_object";
+		# print "Archive: $archive, Archive Object: $archive_object, Symbol: $symbol, Symbol Object: $symbol_object, Symbol Archive: $symbol_archive\n\n";
+	}
+	else
+	{
+		print "Unhandled line: $line\n";
+	}
+}
+
+
+#########################################################################################################################
+
+sub process_discarded_section
+{
+	my $line = shift;
+
+	# .text.SystemCoreClockUpdate
+	if($line =~ /^\s+[a-zA-Z0-9._-]+$/)
+	{
+		$part1 = $line;
+		# print "Part1: $line\n";
+		return;
+	}
+
+	if($line eq '')
+	{
+		if($exit_on_empty_line)
+		{
+			$section_handler = undef;
+			$exit_on_empty_line = 0;
+			# print "Done processing discarded sections\n";
+
+			# Section, Size, Archive, Object
+			my $colum_config = {
+				header_row => 1,
+				autofilter => 1,
+				total_row => 1,
+				columns => [
+					{
+						header => 'Section',
+						total_string => 'Total',
+						format => $bold_format,
+					},
+					{
+						header => 'Size',
+						total_function => 'sum',
+						format => $bold_integer_format,
+					},
+					{
+						header => 'Archive',
+						total_function => 'count',
+						format => $bold_integer_format
+					},
+					{
+						header => 'Object',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+				]
+			};
+
+			$worksheet->add_table( 2, 0, $r - 1, 3, $colum_config );
+		}
+		else
+		{
+			$exit_on_empty_line = 1;
+		}
+		return;
+	}
+
+	$line = $part1 . $line;
+	$part1 = '';
+
+	# .text 0x0000000000000000 0x0 /usr/lib/gcc/arm-none-eabi/10.3.1/thumb/v8-m.main/nofp/crti.o
+	if($line =~ /^\s+([^ \t]+)\s+0[xX]0+\s+(0[xX][0-9a-fA-F]+)\s+(.+\.o)$/)
+	{
+		# $1 is section name
+		# $2 is section size
+		# $3 is object file
+		my $section_name = trim($1);
+		my $section_size = trim($2);
+		my $object = basename(trim($3));
+
+		return if($ignored_sections{$section_name});
+
+		# Section, Size, Archive, Object
+		$worksheet->write_string($r, 0, $section_name, $normal_format);
+		$worksheet->write_number($r, 1, hex2dec($section_size), $integer_format);
+		$worksheet->write_string($r, 2, '', $normal_format);
+		$worksheet->write_string($r, 3, $object, $normal_format);
+		$r++;
+		# print "Section: $section_name, Section Size: $section_size, Object: $object\n\n";
+	}
+
+	# .text 0x0000000000000000 0x168 /usr/lib/gcc/arm-none-eabi/10.3.1/thumb/v8-m.main/nofp/libgcc.a(_arm_mulsf3.o)
+	elsif($line =~ /^\s+([^ \t]+)\s+0[xX]0+\s+(0[xX][0-9a-fA-F]+)\s+([^(]+)\(([^)]+)\)$/)
+	{
+		# $1 is section name
+		# $2 is section size
+		# $3 is archive file
+		# $4 is object file
+		my $section = trim($1);
+		my $section_size = trim($2);
+		my $archive = basename(trim($3));
+		my $object = trim($4);
+
+		return if($ignored_sections{$section});
+
+		# Section, Size, Archive, Object
+		$worksheet->write_string($r, 0, $section, $normal_format);
+		$worksheet->write_number($r, 1, hex2dec($section_size), $integer_format);
+		$worksheet->write_string($r, 2, $archive, $normal_format);
+		$worksheet->write_string($r, 3, $object, $normal_format);
+		$r++;
+		$object = "$archive:$object";
+		# print "Section: $section, Section Size: $section_size, Object: $object\n\n";
+	}
+	else
+	{
+		print "Unhandled line: $line\n";
+	}
+}
+
+
+#########################################################################################################################
+
+sub process_memory_configuration
+{
+	my $line = shift;
+
+	# *default*        0x0000000000000000 0xffffffffffffffff
+	if($line =~ /^\*default\*\s+0x0+\s+0x[fF]+\s*$/)
+	{
+		return;
+	}
+
+	# m_interrupts     0x0000000000000000 0x0000000000000200 xr
+	if($line =~ /^([^ \t]+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s*([rwx]*)$/)
+	{
+		# $1 is output section name
+		# $2 is start address
+		# $3 is length
+		# $4 are attributes (optional)
+		my $output_section = $1;
+		my $section_start = $2;
+		my $section_length = $3;
+		my $attributes = ($4 or '');
+
+		# Section, Start, Length, Flags
+		$worksheet->write_string($r, 0, $output_section, $normal_format);
+		$worksheet->write_number($r, 1, hex2dec($section_start), $integer_format);
+		$worksheet->write_number($r, 2, hex2dec($section_length), $integer_format);
+		$worksheet->write_string($r, 3, $attributes, $normal_format);
+		$r++;
+		# print "Output section '$output_section' from '$section_start', length '$section_length', flags '$attributes'\n";
+	}
+
+	# Name             Origin             Length             Attributes
+	elsif($line =~ /^Name\s+Origin\s+Length\s+Attributes$/)
+	{
+		return;
+	}
+
+	elsif($line eq '')
+	{
+		if($exit_on_empty_line)
+		{
+			$section_handler = undef;
+			$exit_on_empty_line = 0;
+			# print "Done processing memory configuration\n";
+
+			# Section, Start, Length, Flags
+			my $colum_config = {
+				header_row => 1,
+				autofilter => 1,
+				total_row => 1,
+				columns => [
+					{
+						header => 'Section',
+						total_string => 'Total',
+						format => $bold_format,
+					},
+					{
+						header => 'Start',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+					{
+						header => 'Length',
+						total_function => 'sum',
+						format => $bold_integer_format
+					},
+					{
+						header => 'Flags',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+				]
+			};
+
+			$worksheet->add_table( 2, 0, $r - 1, 3, $colum_config );
+		}
+		else
+		{
+			$exit_on_empty_line = 1;
+		}
+		return;
+	}
+	else
+	{
+		print "Unhandled line: $line\n";
+	}
+}
+
+
+
+
+
+#########################################################################################################################
+
+sub process_memory_map
+{
+	my $line = shift;
+
+	# .noinit_rpmsg_sh_mem
+	#  .text.SystemInitHook
+	if($line =~ /^ ?\.\S+$/)
+	{
+		$part1 = $line;
+		# print "Part1: $line\n";
+		return;
+	}
+
+	$line = $part1 . $line;
+	$part1 = '';
+
+
+	# .core1_code     0x0000000000072000        0x0
+	if($line =~ /^(\S+)\s+(0[xX][0-9a-fA-F]+)\s+(0[xX][0-9a-fA-F]+)$/)
+	{
+		# $1 is output section name
+		# $2 is output section start address
+		# $3 is output section length
+		my $section_name = $1;
+		my $start_address = $2;
+		my $length = $3;
+		$output_section = $section_name;
+		$input_section = '';
+		$object_file = '';
+		$output_sections{$section_name}{'start'} = $start_address;
+		$output_sections{$section_name}{'length'} = $length;
+		$output_sections{$section_name}{'load'} = undef;
+		# print "Section $section_name @ $start_address of length $length\n";
+		return;
+	}
+
+
+	# .data           0x0000000020000000      0x160 load address 0x0000000000005258'
+	if($line =~ /^(\S+)\s+(0[xX][0-9a-fA-F]+)\s+(0[xX][0-9a-fA-F]+)\s+load\s+address\s+(0[xX][0-9a-fA-F]+)$/)
+	{
+		# $1 is output section name
+		# $2 is output section start address
+		# $3 is output section length
+		# $4 is output section load address
+		my $section_name = $1;
+		my $start_address = $2;
+		my $length = $3;
+		my $load_address = $4;
+		$output_section = $section_name;
+		$input_section = '';
+		$object_file = '';
+		$output_sections{$section_name}{'start'} = $start_address;
+		$output_sections{$section_name}{'length'} = $length;
+		$output_sections{$section_name}{'load'} = $load_address;
+		# print "Section $section_name @ $start_address of length $length loaded from $load_address\n";
+		return;
+	}
+
+
+	#  .isr_vector    0x0000000000000000      0x130 ../startup/startup_LPC55S69_cm33_core0.o
+	#  .text.SystemInitHook  0x0000000000000c10        0x2 ../../lib/libmcu/LPC55S69/system_LPC55S69_cm33_core0.o
+	if($line =~ /^ (\S+)\s+(0[xX][0-9a-fA-F]+)\s+(0[xX][0-9a-fA-F]+)\s+(\S+)$/)
+	{
+		# $1 is input section name
+		# $2 is input section address in output section
+		# $3 is input section length
+		# $4 is object file
+		my $section_name = $1;
+		my $start_address = $2;
+		my $length = $3;
+		my $object = basename($4);
+		$input_section = $section_name;
+		$object_file = $object;
+		$input_sections{$section_name}{$object}{'start'} = $start_address;
+		$input_sections{$section_name}{$object}{'length'} = $length;
+		# print "Section $section_name from object $object @ $start_address of length $length\n";
+		return;
+	}
+
+
+	#                 0x000000000000028c                _stack_init
+	if($line =~ /^\s{16,}(0[xX][0-9a-fA-F]+)\s+(\S+)$/)
+	{
+		# $1 is symbol address in output section
+		# $2 is symbol name
+		my $address = $1;
+		my $symbol = $2;
+		my $object = $object_file;
+		my $archive = '';
+		if($object =~ /^(\S+\.a)\(([^)]+)\)$/)
+		{
+			# $1 is archive
+			# $2 is object
+			$archive = $1;
+			$object = $2;
+		}
+
+		return if($ignored_sections{$input_section});
+
+		# Symbol, Address, Archive, Object, Section
+		$worksheet->write_string($r, 0, $symbol, $normal_format);
+		$worksheet->write_number($r, 1, hex2dec($address), $integer_format);
+		$worksheet->write_string($r, 2, $archive, $normal_format);
+		$worksheet->write_string($r, 3, $object, $normal_format);
+		$worksheet->write_string($r, 4, $input_section, $normal_format);
+		$r++;
+		# print "Symbol $symbol from input section $input_section from file $object_file @ address $address\n";
+		return;
+	}
+
+
+=pod
+	if($line =~ /^\s{16,}0[xX][0-9a-fA-F]+\s{16,}\S+/)
+	{
+		# ignoring symbols defined on command line or linker script
+		print "Ignored line: $line\n";
+		return;
+	}
+=cut
+
+
+	# LOAD ../usb/device/usb_device_lpcip3511.o
+	# LOAD ../../lib/libmcu/LPC55S69/libmcu.a
+	if($line =~ /^LOAD\s+(.+)$/)
+	{
+		# $1 is object or archive name
+		# my $object = basename($1);
+		# print "Loaded object/archive $object\n";
+		return;
+	}
+
+	# OUTPUT(gmi.elf elf32-littlearm)
+	if($line =~ /^OUTPUT\(/)
+	{
+		$exit_on_empty_line = 1;
+		return;
+	}
+
+	# ignoring useless lines
+	return if($line =~ /^START GROUP$/);
+	return if($line =~ /^END GROUP$/);
+	# ' *fill*         0x0000000000000c12        0x2 '
+	return if($line =~ /^ \*fill\*\s+0[xX][0-9a-fA-F]+\s+0[xX][0-9a-fA-F]+\s*$/);
+	# '.ARM.extab *(.ARM.extab* .gnu.linkonce.armextab.*)'
+	return if($line =~ /^ \S+\s+0[xX][0-9a-fA-F]+\s+0[xX][0-9a-fA-F]+\s+linker stubs$/);
+	# '.ARM.extab *(.ARM.extab* .gnu.linkonce.armextab.*)'
+	return if($line =~ /^ \*\([^ )]+\)$/);
+	# ' *crtbegin?.o(.ctors)'
+	# ' *(SORT_BY_NAME(.ctors.*))'
+	return if($line =~ /^ \*\S+$/);
+	# ' *(EXCLUDE_FILE(*crtend.o *crtend?.o) .ctors)'
+	return if($line =~ /^ \*\(EXCLUDE_FILE\(/);
+	# '                [!provide]                        PROVIDE (end = .)'
+	return if($line =~ /PROVIDE\s+\(/);
+	# '.ARM.extab *(.ARM.extab* .gnu.linkonce.armextab.*)'
+	return if($line =~ /^\.ARM\.extab\s+\*\(/);
+	#                 0x0000000000000400                HEAP_SIZE = DEFINED (__heap_size__)?__heap_size__:0x400
+	#                 0x0000000000000001                ASSERT ((__StackLimit >= __HeapLimit), region m_data overflowed with stack and heap)
+	if($line =~ /^\s{16,}(0[xX][0-9a-fA-F]+)\s+(\S+)[ =<>]/)
+	{
+		return;
+	}
+
+
+	if($line eq '')
+	{
+		if($exit_on_empty_line)
+		{
+			$section_handler = undef;
+			$exit_on_empty_line = 0;
+
+			# Symbol, Address, Archive, Object, Section
+			my $colum_config = {
+				header_row => 1,
+				autofilter => 1,
+				total_row => 1,
+				columns => [
+					{
+						header => 'Symbol',
+						total_string => 'Total',
+						format => $bold_format,
+					},
+					{
+						header => 'Address',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+					{
+						header => 'Archive',
+						total_function => 'count',
+						format => $bold_integer_format
+					},
+					{
+						header => 'Object',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+					{
+						header => 'Section',
+						total_function => 'count',
+						format => $bold_integer_format,
+					},
+				]
+			};
+
+			$worksheet->add_table( 2, 0, $r - 1, 4, $colum_config );
+
+			# print "Done processing memory map\n";
+
+			write_input_sections();
+			write_output_sections();
+		}
+		return;
+	}
+	else
+	{
+		print "Unhandled line: '$line'\n";
+	}
+}
+
+
+#########################################################################################################################
+
+sub process_xref_table
+{
+	my $line = shift;
+
+
+	return if($line =~ /^Symbol\s+File$/);
+
+	my $symbol_name = '';
+	my $archive = '';
+	my $object = '';
+
+
+	# ACMP_DriverIRQHandler                             ../startup/startup_LPC55S69_cm33_core0.o
+	if($line =~ /^(\S+)\s+(\S+)$/)
+	{
+		# $1 is symbol name
+		# $2 is object file or archive/file
+		$symbol_name = $1;
+		$object = basename($2);
+		$part1 = $symbol_name;
+	}
+	#                                                   ../drivers/fsl_power.o
+	elsif($line =~ /^\s{30,}(\S+)$/)
+	{
+		# $1 is object file or archive/file
+		$object = basename($1);
+		$symbol_name = $part1;
+	}
+
+	if($object && $symbol_name)
+	{
+		if($object =~ /^(\S+\.a)\(([^)]+)\)$/)
+		{
+			# $1 is archive
+			# $2 is object
+			$archive = $1;
+			$object = $2;
+		}
+
+		# print "Symbol $symbol_name referenced from object $archive:$object\n";
+		# Symbol, Archive, Object
+		$worksheet->write_string($r, 0, $symbol_name, $normal_format);
+		$worksheet->write_string($r, 1, $archive, $normal_format);
+		$worksheet->write_string($r, 2, $object, $normal_format);
+		$r++;
+		return;
+	}
+
+	if($line eq '')
+	{
+		if($exit_on_empty_line)
+		{
+			$section_handler = undef;
+			$exit_on_empty_line = 0;
+
+			if($add_xref_table)
+			{
+				$add_xref_table = 0;
+
+				# Symbol, Archive, Object
+				my $colum_config = {
+					header_row => 1,
+					autofilter => 1,
+					total_row => 1,
+					columns => [
+						{
+							header => 'Symbol',
+							total_string => 'Total',
+							format => $bold_format,
+						},
+						{
+							header => 'Archive',
+							total_function => 'count',
+							format => $bold_integer_format
+						},
+						{
+							header => 'Object',
+							total_function => 'count',
+							format => $bold_integer_format,
+						},
+					]
+				};
+
+				$worksheet->add_table( 2, 0, $r - 1, 2, $colum_config );
+			}
+
+			# print "Done processing xref table\n";
+		}
+		else
+		{
+			$exit_on_empty_line = 1;
+		}
+	}
+	else
+	{
+		print "Unhandled line: '$line'\n";
+	}
+}
